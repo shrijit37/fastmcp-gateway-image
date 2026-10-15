@@ -115,14 +115,39 @@ jobs:
           exit 1
 
       - name: Gate — assert the discovery registry is complete
+        env:
+          # The endpoint executes every Dokploy tool, so /mcp requires this
+          # bearer token. /healthz stays public for the SHA gate above.
+          GATEWAY_AUTH_TOKEN: ${{ secrets.GATEWAY_AUTH_TOKEN }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import json, os, re, sys, urllib.request
 
           url = f"{os.environ['APP_URL']}/mcp"
-          headers = {"Content-Type": "application/json",
-                     "Accept": "application/json, text/event-stream"}
+          token = os.environ.get("GATEWAY_AUTH_TOKEN", "")
+          if not token:
+              print("::error::repo secret GATEWAY_AUTH_TOKEN is not set — cannot verify the tool surface")
+              sys.exit(1)
+          base_headers = {"Content-Type": "application/json",
+                          "Accept": "application/json, text/event-stream"}
+
+          # 1. The endpoint must refuse anonymous callers.
+          try:
+              anon = urllib.request.Request(url, data=json.dumps(
+                  {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                   "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                              "clientInfo": {"name": "anon-probe", "version": "0"}}}).encode(),
+                  headers=base_headers)
+              anon_status = urllib.request.urlopen(anon, timeout=30).status
+          except urllib.error.HTTPError as exc:
+              anon_status = exc.code
+          if anon_status != 401:
+              print(f"::error::anonymous initialize returned {anon_status}, expected 401 — the gateway is serving tools without a token")
+              sys.exit(1)
+          print("anonymous access rejected (401)")
+
+          headers = dict(base_headers, Authorization=f"Bearer {token}")
           sid = None
 
           def post(payload):

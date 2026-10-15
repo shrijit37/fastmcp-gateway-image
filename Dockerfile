@@ -51,16 +51,18 @@ if __name__ == "__main__":
     main()
 PY
 
-# The gateway's /healthz is a hardcoded {"status":"ok"} — no build identity, so
-# no deploy can prove which SHA is live. This middleware adds service+version to
-# that one route; it is loaded through the gateway's own env-driven hook and
-# gated by the allowlist entry below. Both values are baked here so a plain
-# `docker run` of this image reports its identity, and both stay overridable
-# from the Dokploy app env.
-COPY health_version.py /opt/gateway/health_version.py
+# gateway_middleware.py carries two things the raw gateway lacks:
+#   1. bearer auth on every route except /healthz + /readyz — this endpoint
+#      executes all 604 Dokploy tools, including destructive ones, and fails
+#      closed (503) when GATEWAY_AUTH_TOKEN is unset;
+#   2. service+version on /healthz, the identity a deploy gate asserts.
+# Loaded through the gateway's own env-driven hook, gated by the allowlist
+# entry below. The module path is baked here; the token comes from the compose
+# env so it never lives in the image.
+COPY gateway_middleware.py /opt/gateway/gateway_middleware.py
 ENV PYTHONPATH=/opt/gateway \
-    GATEWAY_MIDDLEWARE_MODULE=health_version:middleware \
-    GATEWAY_ALLOWED_MIDDLEWARE_PREFIXES=health_version \
+    GATEWAY_MIDDLEWARE_MODULE=gateway_middleware:middleware \
+    GATEWAY_ALLOWED_MIDDLEWARE_PREFIXES=gateway_middleware \
     APP_VERSION=${APP_VERSION}
 
 ENTRYPOINT ["python", "/usr/local/bin/gateway_entry.py"]
