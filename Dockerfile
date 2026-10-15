@@ -132,4 +132,16 @@ RUN set -eux; \
     rm -f /tmp/gh-mcp.tgz; \
     github-mcp-server --version
 
+# Vendored stdio bridge to Cloudflare's hosted MCP server. See
+# upstreams/cloudflare-mcp-proxy/proxy.py for why this exists instead of
+# `mcp-remote`: that one answers a rejected credential with an interactive OAuth
+# flow that blocks registry population and takes every client down with it.
+# The import check below fails the build if the image's fastmcp stops exposing
+# the proxy API this bridge is written against.
+COPY upstreams/cloudflare-mcp-proxy /opt/cf-mcp-proxy
+RUN python -c "from fastmcp.client.transports import StreamableHttpTransport; \
+from fastmcp.server import create_proxy; \
+from fastmcp.server.providers.proxy import ProxyClient; \
+print('fastmcp proxy API present')"
+
 ENTRYPOINT ["python", "/usr/local/bin/gateway_entry.py"]

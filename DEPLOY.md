@@ -219,7 +219,7 @@ gateway passes to the child verbatim:
 |---|---|---|---|
 | `github` | `github-mcp-server stdio --read-only` (vendored v2.0.2, MIT) | `GITHUB_PERSONAL_ACCESS_TOKEN` | 27 read-only tools (`repo:oracle/mcp` search verified live) |
 | `oci` | `oracle.oci-api-mcp-server` (Oracle-official, pip 2.1.5) | `OCI_CLI_AUTH=api_key` + `OCI_CLI_USER`/`TENANCY`/`FINGERPRINT`/`REGION`/`KEY_CONTENT` | OCI CLI discovery + execution tools |
-| `cloudflare` | `npx -y mcp-remote@0.15.1 https://mcp.cloudflare.com/mcp --header "Authorization: Bearer ${CLOUDFLARE_MCP_TOKEN}"` | `CLOUDFLARE_MCP_TOKEN` | 4 Code-Mode tools over ~2500 Cloudflare API endpoints |
+| `cloudflare` | `python /opt/cf-mcp-proxy/proxy.py` (vendored bridge) | `CLOUDFLARE_MCP_TOKEN` | 4 Code-Mode tools over ~2500 Cloudflare API endpoints |
 
 **GitHub** is vendored as a static Go binary at image build (release tag pinned,
 per-arch sha256 verified, `CGO_ENABLED=0` so it has no runtime deps). `--read-only`
@@ -240,10 +240,15 @@ come from the workstation profile `~/.oci/config`: user/tenancy/fingerprint/regi
 as plain values, and the private key as PEM **text** in `OCI_CLI_KEY_CONTENT`
 (no file is written to disk in the container).
 
-**Cloudflare** reaches the unified official server through `mcp-remote`, which
-expands `${…}` from its own environment, so the token never appears in `args`.
-`CLOUDFLARE_MCP_TOKEN` is an *account-owned API token* minted with
-`POST /accounts/<id>/tokens` (name `fastmcp-gateway-mcp`), scoped to 24 read-only
+**Cloudflare** reaches the unified official server through a vendored 12-line
+bridge (`upstreams/cloudflare-mcp-proxy/proxy.py`) rather than the usual
+`mcp-remote` package, because `mcp-remote` answers a rejected credential with an
+interactive OAuth flow and waits for a browser that never opens. Measured
+2026-10-16: that call happens during registry population, so it blocked the whole
+gateway — every client got **502** until the upstream was removed. The bridge
+attaches one static header and fails fast instead: with a bad token it dies in
+~6 s and population simply skips the domain. `CLOUDFLARE_MCP_TOKEN` is an
+*account-owned API token* minted with `POST /accounts/<id>/tokens` (name `fastmcp-gateway-mcp`), scoped to 24 read-only
 permission groups, non-expiring. The CLI's own OAuth session
 (`~/.config/cloudflare/config/default.json`) **does** expire — it was ~40 minutes
 from expiry when this was wired — which is why the durable token exists. Some
