@@ -148,10 +148,11 @@ replaces the whole block).
 ## Vendored upstream: websearch
 
 `upstreams/ccb-web-mcp/` is a keyless web search/fetch MCP server — three tools
-(`web_search`, `web_fetch`, `web_search_health`), three backends (bing default,
-tavily, exa), no API key for any of them. It is vendored here and runs **inside
-the gateway container** as a stdio child, so it needs no second service, image or
-domain. Provenance and its licensing caveat: `upstreams/ccb-web-mcp/NOTICE.md`.
+(`web_search`, `web_fetch`, `web_search_health`) over three backends (bing,
+tavily, exa), none of which needs an API key. It is vendored here and runs
+**inside the gateway container** as a stdio child, so it needs no second
+service, image or domain. Provenance and its licensing caveat:
+`upstreams/ccb-web-mcp/NOTICE.md`.
 
 Bundle, not source-run: the base image's node is 20 and native TypeScript
 execution needs 22.6+, so the Dockerfile runs `npm ci` and a pinned
@@ -168,16 +169,34 @@ live:
    green (both gates pass with or without this child running);
 2. `compose.saveEnvironment` with the **whole** env block, adding
    `"websearch": {"mcpServers": {"websearch": {"command": "node",
-   "args": ["/opt/ccb-web-mcp/dist/index.js"]}}}` to `GATEWAY_UPSTREAMS`;
+   "args": ["/opt/ccb-web-mcp/dist/index.js"], "env": {"WEB_SEARCH_ADAPTER":
+   "exa"}}}}` to `GATEWAY_UPSTREAMS`;
 3. `compose.deploy`, then verify: container log
    `Populated 3 tools from upstream 'websearch'`, `discover_tools(domain="websearch")`
-   listing all three, `execute_tool` → `web_search` returning real URLs, and
-   `web_search_health` reporting each backend (`markup-drift` there means Bing
-   changed its markup and `src/backends/bing.ts` needs the parser updated).
+   listing all three, and `execute_tool` → `web_search` on a query whose answer
+   you know (see the backend note below — a result *count* proves nothing).
 
-Optional knobs, all defaulted, set in the compose env: `WEB_SEARCH_ADAPTER`,
-`TAVILY_ENDPOINT_URL`, `EXA_API_KEY`, `EXA_ENDPOINT_URL`,
-`WEB_FETCH_HTTP_TIMEOUT_MS`.
+**Per-upstream settings belong in that entry's `env`, never the container env.**
+The gateway does not hand its own environment to stdio children: a
+container-level `WEB_SEARCH_ADAPTER=exa` was deployed and confirmed present in
+`/proc/1/environ`, and the child still defaulted to bing; moving the same key
+into the entry's `env` block took effect immediately. `dokploy` and `infisical`
+carry their credentials the same way for the same reason.
+
+**The deployed default backend is `exa`, not the server's own `bing` default.**
+Measured 2026-10-16 from both this host and the workstation: bing returned
+unrelated SERPs — `"arch linux zram swap configuration"` came back as travel
+destinations, then AI-funding pages, then a scholarship portal, a different set
+per request, and `"ocisly barge landing"` returned porn and YouTube junk. bing
+is nonetheless the backend the self-contained design prefers, so it is only
+demoted in this deployment, per call overridable via the tool's `backend`
+argument. `web_search_health` will *not* catch this class of failure: it counts
+results and has no relevance signal, so it is a liveness probe only. tavily and
+exa returned correct, source-worthy results for the same queries.
+
+Per-call-independent knobs (`TAVILY_ENDPOINT_URL`, `EXA_API_KEY`,
+`EXA_ENDPOINT_URL`, `WEB_FETCH_HTTP_TIMEOUT_MS`) go in the same `env` block and
+are otherwise left at their defaults.
 
 ## Repo layout
 

@@ -46,6 +46,11 @@ All three are keyless — none can prompt for or fail on a missing key.
 | `EXA_ENDPOINT_URL` | `https://mcp.exa.ai/mcp` | Alternate Exa MCP endpoint |
 | `WEB_FETCH_HTTP_TIMEOUT_MS` | `60000` | Default timeout for `web_fetch` |
 
+In the gateway deployment `WEB_SEARCH_ADAPTER` is set to `exa` inside the
+upstream's `env` block, because bing currently answers scrapers with unrelated
+SERPs (measured 2026-10-16; see `../../DEPLOY.md`). The code default stays
+`bing` — callers can still name any backend per call.
+
 ## Where this runs
 
 This directory is the canonical copy. It is vendored into the gateway image
