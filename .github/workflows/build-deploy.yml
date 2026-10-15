@@ -114,7 +114,7 @@ jobs:
           echo "::error::gate failed — $APP_URL/healthz never reported $GITHUB_SHA (the previous container keeps answering while the new one starts, so liveness alone proves nothing)"
           exit 1
 
-      - name: Gate — assert the tool surface came back
+      - name: Gate — assert the discovery registry is complete
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -148,7 +148,11 @@ jobs:
                        "params": {"name": "discover_tools", "arguments": {"domain": "dokploy"}}})
           names = re.findall(r"^([A-Za-z0-9_.-]+)\(", text["result"]["content"][0]["text"], re.M)
 
-          # The write surface the schema-depth cap used to drop silently.
+          # Reachability, not context cost: these 4 meta-tools are all a client
+          # ever loads; the 604 below are what discover_tools can reach on
+          # demand. A depth-capped tool is not "expensive", it is absent --
+          # discovery never lists it and execute_tool never sees it, silently.
+          # That is the bug this gate exists to catch.
           required = ["application-update", "ai-deploy", "sso-register",
                       "admin-setupMonitoring", "vaultProvider-create",
                       "postgres-update", "redis-update", "whitelabeling-update"]

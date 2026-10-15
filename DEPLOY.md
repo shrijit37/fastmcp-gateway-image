@@ -57,12 +57,18 @@ dependency assertion is CI gate 2, and the same check by hand is:
 POST /mcp  initialize → tools/call discover_tools {domain:"dokploy"}
 ```
 
-A healthy gateway lists 604 dokploy tools plus deepwiki (3) and context7 (2).
-There is no Docker health check on the service.
+A healthy gateway exposes **4 client-visible tools** (`discover_tools`,
+`get_tool_schema`, `execute_tool`, `refresh_registry` — about 7.4 KB of schemas,
+the entire context cost of mounting it) and a discovery registry behind them
+holding 604 dokploy tools plus deepwiki (3) and context7 (2). Nothing from the
+registry enters context unless the agent asks: a whole-domain listing
+(`discover_tools("dokploy")`) is ~107 KB, a single tool's schema about 250 B.
 
-Soundness caveat: Tool count is a proxy for "all three upstreams came up", not
-proof that a given tool does the right thing — as with the schema fix, a
-rejected tool shows up as a missing name, which is what gate 2 watches.
+Gate 2 asserts that *registry*, not the visible surface, because the failure mode
+it guards is silence: a tool whose `inputSchema` exceeds the depth cap is not
+"expensive to load", it does not exist — discovery never lists it and
+`execute_tool` never receives it, with no error anywhere. There is no Docker
+health check on the service.
 
 ## Secrets
 
