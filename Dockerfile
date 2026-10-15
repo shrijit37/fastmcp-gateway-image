@@ -132,14 +132,25 @@ RUN set -eux; \
     rm -f /tmp/gh-mcp.tgz; \
     github-mcp-server --version
 
-# Vendored stdio bridge to Cloudflare's hosted MCP server. See
-# upstreams/cloudflare-mcp-proxy/proxy.py for why this exists instead of
-# `mcp-remote`: that one answers a rejected credential with an interactive OAuth
-# flow that blocks registry population and takes every client down with it.
-# The import check below fails the build if the image's fastmcp stops exposing
-# the proxy API this bridge is written against.
+# Vendored stdio bridge for upstreams the gateway cannot talk to directly — see
+# upstreams/mcp-bridge/bridge.py. Two cases it exists for:
+#   1. a remote HTTP upstream needing a static bearer token (the gateway applies
+#      GATEWAY_UPSTREAM_HEADERS only on the execution path, so such an upstream
+#      cannot populate);
+#   2. a local stdio upstream that does not answer a repeated `initialize` — the
+#      gateway reuses a stdio child and re-initializes it per call, and
+#      github-mcp-server refuses the second one, so every call after the first
+#      fails until a bridge answers the handshake in front of it.
+# The import check below fails the build if the image's fastmcp stops exposing the
+# proxy API this bridge is written against.
+COPY upstreams/mcp-bridge /opt/mcp-bridge
+# The predecessor of the bridge, still referenced by the deployed compose env
+# until that entry migrates (next release). Remove this COPY and the directory
+# once `cloudflare` points at /opt/mcp-bridge/bridge.py — dropping it now would
+# break that upstream for the window between this image rolling and the env
+# update landing.
 COPY upstreams/cloudflare-mcp-proxy /opt/cf-mcp-proxy
-RUN python -c "from fastmcp.client.transports import StreamableHttpTransport; \
+RUN python -c "from fastmcp.client.transports import StdioTransport, StreamableHttpTransport; \
 from fastmcp.server import create_proxy; \
 from fastmcp.server.providers.proxy import ProxyClient; \
 print('fastmcp proxy API present')"
