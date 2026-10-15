@@ -66,10 +66,15 @@ credentials for:
    Verify `/healthz` reports the SHA and the tool surface is complete, then
    delete the old app. Needs a short domain cutover window.
 2. **Make the app repo-sourced**: set the GitHub provider to this repo
-   (`shrijit37/fastmcp-gateway-image`, branch `main`, build type Dockerfile).
-   `deploy` then clones and builds this Dockerfile, and CI must additionally
-   re-assert `buildArgs=APP_VERSION=<sha>` before deploying to keep the
-   `/healthz` version gate meaningful.
+   (`shrijit37/fastmcp-gateway-image`, branch `main`, build type Dockerfile)
+   and assert `buildArgs=APP_VERSION=<sha>` before each deploy so the `/healthz`
+   version gate stays meaningful. **Tested on a throwaway app and it does not
+   work as-is:** `saveGithubProvider` returns `true` and the fields read back,
+   but the deploy never clones — it fails with
+   `/bin/sh: 3: cd: can't cd to /etc/dokploy/applications/<app>/code/ … does not
+   exist`. Dokploy's own provider listing reports `pull: false` for this repo,
+   so the GitHub App installation cannot fetch it either; grant it access (or
+   use a deploy key) before retrying.
 
 Until one lands, the app's runtime correctness comes from its env block, not
 from this repo — the tool-surface fix below survived rebuilds only for that
