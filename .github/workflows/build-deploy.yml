@@ -1,11 +1,15 @@
-name: build
+name: build-deploy
 
-# Publishes the gateway image. Nothing here deploys: the Dokploy app
-# (`fastmcp-gateway`, A9F6GcGMBXzeQl2V5foFh) is still build-sourced, and this
-# Dokploy build (v0.30.8) does not honour a docker-provider switch on an app
-# created from a git source, so a deploy job here would only rebuild that
-# app's server-side Dockerfile and then fail the SHA gate. See DEPLOY.md
-# ("Cutover not finished") for the evidence and the remaining manual step.
+# Build the gateway image, publish it to GHCR, pin it in the Dokploy *compose*
+# app, roll that app, then gate on the running build and the exposed tool
+# surface. Nothing is built on the server: Dokploy pulls the SHA-tagged image.
+#
+# Why a compose app rather than the original Dokploy *application*: on this
+# Dokploy build (v0.30.8) an application created from a git source never
+# becomes image-sourced — `application.saveDockerProvider` returns true but the
+# service keeps building a server-side Dockerfile, so a deploy could never run
+# this repo's image. A compose app's compose file is owned by the API and its
+# deploys are pure image pulls. See DEPLOY.md.
 
 on:
   push:
@@ -17,8 +21,12 @@ permissions:
   packages: write
 
 concurrency:
-  group: build-main
+  group: build-deploy-main
   cancel-in-progress: false
+
+env:
+  APP_URL: https://mcp.shrijit.tech
+  DOKPLOY_URL: ${{ vars.DOKPLOY_URL || 'https://manage.shrijit.tech' }}
 
 jobs:
   build:
@@ -41,10 +49,115 @@ jobs:
           # Both platforms: the Dokploy host is linux/arm64.
           platforms: linux/amd64,linux/arm64
           push: true
-          # APP_VERSION is the identity /healthz reports, so whichever container
-          # ends up running can be checked against a commit.
+          # APP_VERSION is what /healthz reports; the gate below asserts it, so
+          # a stale container can never pass as this build.
           build-args: |
             APP_VERSION=${{ github.sha }}
           tags: |
             ghcr.io/${{ github.repository }}:${{ github.sha }}
             ghcr.io/${{ github.repository }}:latest
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pin the compose app to this build
+        env:
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          COMPOSE_ID: ${{ vars.DOKPLOY_COMPOSE_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${COMPOSE_ID:-}" ]; then
+            echo "::error::repo variable DOKPLOY_COMPOSE_ID is not set (Dokploy → project mcp-gateway → compose app)"
+            exit 1
+          fi
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_SHA"
+          # Only the compose file is written. The app's encrypted env block
+          # (GATEWAY_UPSTREAMS and friends) is left untouched -- verified that
+          # compose.update with no `env` key leaves it byte-identical.
+          jq -nc --arg id "$COMPOSE_ID" --arg img "$IMAGE" \
+            '{composeId: $id,
+              composeFile: ("# deployed-build: " + ($img | split(":")[1]) + "\n"
+                + "services:\n  gateway:\n    image: " + $img + "\n"
+                + "    env_file:\n      - .env\n    restart: unless-stopped\n")}' > /tmp/payload.json
+          curl -fsS -X POST "$DOKPLOY_URL/api/compose.update" \
+            -H "x-api-key: $DOKPLOY_API_KEY" -H 'Content-Type: application/json' \
+            -d @/tmp/payload.json >/dev/null
+          echo "compose file pinned to $IMAGE"
+
+      - name: Roll the compose app
+        env:
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          COMPOSE_ID: ${{ vars.DOKPLOY_COMPOSE_ID }}
+        run: |
+          set -euo pipefail
+          # compose.deploy pulls the pinned image and recreates the container.
+          curl -fsS -X POST "$DOKPLOY_URL/api/compose.deploy" \
+            -H "x-api-key: $DOKPLOY_API_KEY" -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg id "$COMPOSE_ID" --arg title "CI ${GITHUB_SHA:0:7}" '{composeId: $id, title: $title}')"
+
+      - name: Gate — assert the running build is this SHA
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 300))
+          while [ $SECONDS -lt $deadline ]; do
+            body=$(curl -fsS --max-time 10 "$APP_URL/healthz" || true)
+            version=$(jq -r '.version // empty' <<<"${body:-{}}" 2>/dev/null || true)
+            if [ "$version" = "$GITHUB_SHA" ]; then
+              echo "healthz reports $version — gate passed"
+              cat <<<"$body"
+              exit 0
+            fi
+            echo "waiting: healthz version=${version:-<none>} want=$GITHUB_SHA"
+            sleep 6
+          done
+          echo "::error::gate failed — $APP_URL/healthz never reported $GITHUB_SHA (the previous container keeps answering while the new one starts, so liveness alone proves nothing)"
+          exit 1
+
+      - name: Gate — assert the tool surface came back
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, sys, urllib.request
+
+          url = f"{os.environ['APP_URL']}/mcp"
+          headers = {"Content-Type": "application/json",
+                     "Accept": "application/json, text/event-stream"}
+          sid = None
+
+          def post(payload):
+              global sid
+              h = dict(headers)
+              if sid:
+                  h["mcp-session-id"] = sid
+              req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=h)
+              resp = urllib.request.urlopen(req, timeout=60)
+              sid = resp.headers.get("mcp-session-id") or sid
+              raw = resp.read().decode()
+              for line in raw.splitlines():
+                  if line.startswith("data: "):
+                      return json.loads(line[6:])
+              return json.loads(raw)
+
+          init = post({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                       "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                                  "clientInfo": {"name": "deploy-gate", "version": "0"}}})
+          domains = dict(re.findall(r"\*\*(\w+)\*\* \((\d+) tools\)",
+                                    init["result"]["instructions"]))
+          text = post({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                       "params": {"name": "discover_tools", "arguments": {"domain": "dokploy"}}})
+          names = re.findall(r"^([A-Za-z0-9_.-]+)\(", text["result"]["content"][0]["text"], re.M)
+
+          # The write surface the schema-depth cap used to drop silently.
+          required = ["application-update", "ai-deploy", "sso-register",
+                      "admin-setupMonitoring", "vaultProvider-create",
+                      "postgres-update", "redis-update", "whitelabeling-update"]
+          missing = [t for t in required if t not in names]
+          print(f"domains={domains} dokploy_tools={len(names)} missing={missing}")
+          if missing:
+              print(f"::error::dokploy tools missing from the gateway: {missing}")
+              sys.exit(1)
+          if len(names) < 600:
+              print(f"::error::dokploy tool surface shrank: {len(names)} < 600")
+              sys.exit(1)
+          PY
