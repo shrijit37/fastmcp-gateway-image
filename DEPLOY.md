@@ -217,15 +217,21 @@ gateway passes to the child verbatim:
 
 | domain | command | credential | surface |
 |---|---|---|---|
-| `github` | `github-mcp-server stdio --read-only` (vendored v2.0.2, MIT) | `GITHUB_PERSONAL_ACCESS_TOKEN` | 27 read-only tools (`repo:oracle/mcp` search verified live) |
+| `github` | `github-mcp-server stdio --toolsets all` (vendored v2.0.2, MIT) | `GITHUB_PERSONAL_ACCESS_TOKEN` | **91 tools** including writes (`repo:oracle/mcp` search verified live) |
 | `oci` | `oracle.oci-api-mcp-server` (Oracle-official, pip 2.1.5) | `OCI_CLI_AUTH=api_key` + `OCI_CLI_USER`/`TENANCY`/`FINGERPRINT`/`REGION`/`KEY_CONTENT` | OCI CLI discovery + execution tools |
 | `cloudflare` | `python /opt/cf-mcp-proxy/proxy.py` (vendored bridge) | `CLOUDFLARE_MCP_TOKEN` | 4 Code-Mode tools over ~2500 Cloudflare API endpoints |
 
 **GitHub** is vendored as a static Go binary at image build (release tag pinned,
-per-arch sha256 verified, `CGO_ENABLED=0` so it has no runtime deps). `--read-only`
-is deliberate: this gateway executes tools unattended, so write tools are skipped
-even if a model asks for them. To widen or narrow it, edit the entry's `args` in
-the compose env (`--toolsets repos,issues`, or drop `--read-only`) — not the image.
+per-arch sha256 verified, `CGO_ENABLED=0` so it has no runtime deps). The entry
+runs `--toolsets all` with write tools enabled — 91 tools, against 46 for the
+default toolset set — a deliberate choice made 2026-10-16 so agents can act
+across gists, projects, discussions, dependabot and the rest, not only inspect
+repos. Some of those 91 need OAuth scopes the current `gh` token lacks
+(`gist, read:org, read:packages, repo, workflow`), so a call can still be
+refused by GitHub — swap in a PAT with the scopes you want. The levers to narrow
+it live in the entry's `args`, not the image: add `--read-only` to skip every
+write tool, or scope with `--toolsets repos,issues,pull_requests` (the remote
+server takes the same as `X-MCP-Toolsets`).
 `GITHUB_PERSONAL_ACCESS_TOKEN` currently holds the workstation `gh` OAuth token
 (`gh auth token`); a fine-grained PAT works too and is the least-privilege option.
 Rotate by re-running `gh auth token` and re-applying the env block.
@@ -248,8 +254,13 @@ interactive OAuth flow and waits for a browser that never opens. Measured
 gateway — every client got **502** until the upstream was removed. The bridge
 attaches one static header and fails fast instead: with a bad token it dies in
 ~6 s and population simply skips the domain. `CLOUDFLARE_MCP_TOKEN` is an
-*account-owned API token* minted with `POST /accounts/<id>/tokens` (name `fastmcp-gateway-mcp`), scoped to 24 read-only
-permission groups, non-expiring. The CLI's own OAuth session
+*account-owned API token* minted with `POST /accounts/<id>/tokens` (name `fastmcp-gateway-mcp`), scoped to read **and write**
+permission groups (49 of them zone-scoped, so DNS records, cache purge, worker
+routes and zone settings are all editable). Writes were verified by creating and
+then deleting a TXT record through `execute` (`status: 200`, then
+`success: true`). Policies are editable in place with
+`PUT /accounts/<id>/tokens/<token-id>` and the token **value survives** the
+update, so widening never requires touching the compose env. The CLI's own OAuth session
 (`~/.config/cloudflare/config/default.json`) **does** expire — it was ~40 minutes
 from expiry when this was wired — which is why the durable token exists. Some
 groups (`Workers Content Read-Only`, `Workers Metadata Read-Only`) are outside
