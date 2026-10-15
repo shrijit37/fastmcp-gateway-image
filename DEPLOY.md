@@ -217,24 +217,21 @@ gateway passes to the child verbatim:
 
 | domain | command | credential | surface |
 |---|---|---|---|
-| `github` | `github-mcp-server stdio --toolsets all` (vendored v2.0.2, MIT) | `GITHUB_PERSONAL_ACCESS_TOKEN` | **91 tools** including writes (`repo:oracle/mcp` search verified live) |
+| `github` | `python /opt/mcp-bridge/bridge.py` → `https://api.githubcopilot.com/mcp/x/all` | `MCP_UPSTREAM_TOKEN` (works with a `gho_` OAuth token from `gh auth token`) | **100 tools** including writes (all toolsets) |
 | `oci` | `oracle.oci-api-mcp-server` (Oracle-official, pip 2.1.5) | `OCI_CLI_AUTH=api_key` + `OCI_CLI_USER`/`TENANCY`/`FINGERPRINT`/`REGION`/`KEY_CONTENT` | OCI CLI discovery + execution tools |
-| `cloudflare` | `python /opt/cf-mcp-proxy/proxy.py` (vendored bridge) | `CLOUDFLARE_MCP_TOKEN` | 4 Code-Mode tools over ~2500 Cloudflare API endpoints |
+| `cloudflare` | `python /opt/mcp-bridge/bridge.py` → `https://mcp.cloudflare.com/mcp` | `MCP_UPSTREAM_TOKEN` | 4 Code-Mode tools over ~2500 Cloudflare API endpoints |
 
-**GitHub** is vendored as a static Go binary at image build (release tag pinned,
-per-arch sha256 verified, `CGO_ENABLED=0` so it has no runtime deps). The entry
-runs `--toolsets all` with write tools enabled — 91 tools, against 46 for the
-default toolset set — a deliberate choice made 2026-10-16 so agents can act
-across gists, projects, discussions, dependabot and the rest, not only inspect
-repos. Some of those 91 need OAuth scopes the current `gh` token lacks
-(`gist, read:org, read:packages, repo, workflow`), so a call can still be
-refused by GitHub — swap in a PAT with the scopes you want. The levers to narrow
-it live in the entry's `args`, not the image: add `--read-only` to skip every
-write tool, or scope with `--toolsets repos,issues,pull_requests` (the remote
-server takes the same as `X-MCP-Toolsets`).
-`GITHUB_PERSONAL_ACCESS_TOKEN` currently holds the workstation `gh` OAuth token
-(`gh auth token`); a fine-grained PAT works too and is the least-privilege option.
-Rotate by re-running `gh auth token` and re-applying the env block.
+**GitHub** goes through the vendored bridge to GitHub's hosted MCP endpoint
+(`/mcp/x/all` selects every toolset): 100 tools, writes included, verified with
+three consecutive calls. The local `github-mcp-server` binary is still built into
+the image but no longer registered — it works when driven directly, yet **every
+call after the first fails through the gateway**: the gateway reuses a stdio child
+and re-initializes it per call, and this server refuses the second handshake
+(`duplicate initialize request`, no response) instead of tolerating it the way the
+npx- and Python-based upstreams do. The bridge answers each gateway handshake
+itself and keeps one upstream session, which removes the failure. It also means
+the credential is a plain bearer token, so a fine-grained PAT can replace the
+`gh` OAuth token by editing `MCP_UPSTREAM_TOKEN` alone.
 
 **OCI** installs Oracle's official `oracle.oci-api-mcp-server`; its metadata says
 `requires-python >=3.13` while this image is 3.12, so the install passes
@@ -246,10 +243,10 @@ come from the workstation profile `~/.oci/config`: user/tenancy/fingerprint/regi
 as plain values, and the private key as PEM **text** in `OCI_CLI_KEY_CONTENT`
 (no file is written to disk in the container).
 
-**Cloudflare** reaches the unified official server through a vendored 12-line
-bridge (`upstreams/cloudflare-mcp-proxy/proxy.py`) rather than the usual
-`mcp-remote` package, because `mcp-remote` answers a rejected credential with an
-interactive OAuth flow and waits for a browser that never opens. Measured
+**Cloudflare** reaches the unified official server through the same vendored
+bridge in HTTP mode (`MCP_UPSTREAM_URL` + `MCP_UPSTREAM_TOKEN`) rather than the
+usual `mcp-remote` package, because `mcp-remote` answers a rejected credential
+with an interactive OAuth flow and waits for a browser that never opens. Measured
 2026-10-16: that call happens during registry population, so it blocked the whole
 gateway — every client got **502** until the upstream was removed. The bridge
 attaches one static header and fails fast instead: with a bad token it dies in
@@ -272,8 +269,9 @@ probe fails by design and `/accounts` is the proof it works.
 
 | path | role |
 |---|---|
-| `Dockerfile` | the image: pinned gateway + the two patches + the vendored websearch bundle + the vendored OCI and GitHub upstreams |
+| `Dockerfile` | the image: pinned gateway + the two patches + the vendored websearch bundle + the OCI upstream runtime |
 | `upstreams/ccb-web-mcp/` | vendored stdio upstream `websearch` — source, tests, `NOTICE.md` |
+| `upstreams/mcp-bridge/` | the vendored stdio↔HTTP/stdio bridge both `github` and `cloudflare` run through |
 | `gateway_middleware.py` | bearer auth on every non-probe route + `/healthz` version |
 | `.github/workflows/build-deploy.yml` | build, pin, deploy, both gates |
 | `DEPLOY.md` | this file |

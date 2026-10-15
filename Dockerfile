@@ -109,29 +109,6 @@ RUN pip install --no-cache-dir --ignore-requires-python oracle.oci-api-mcp-serve
     && test -x /usr/local/bin/oracle.oci-api-mcp-server \
     && test -x /usr/local/bin/oci
 
-# Vendored stdio upstream: GitHub's official MCP server (github/github-mcp-server,
-# MIT, v2.0.2). A static Go binary (CGO_ENABLED=0), verified against the release
-# checksum for the arch being built, so it adds no runtime dependency and no npm.
-# `--read-only` is the default here because this gateway executes tools
-# unattended: write tools are skipped even when a model asks for them. Widen the
-# surface (or narrow it with --toolsets) by editing the upstream entry's args in
-# the compose env, not this image.
-ARG GH_MCP_VERSION=2.0.2
-RUN set -eux; \
-    arch="$(dpkg --print-architecture)"; \
-    case "$arch" in \
-      amd64) asset="github-mcp-server_Linux_x86_64.tar.gz"; sha="815e27d931c796af0c97f24fd211e14f8a4607d4528377719a5ad2352086b0b0" ;; \
-      arm64) asset="github-mcp-server_Linux_arm64.tar.gz";  sha="73f5e76c6a3b5e0d731e1134a7c38575df6ec96c646192095a3be2d4d0d6c1fc" ;; \
-      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL -o /tmp/gh-mcp.tgz \
-      "https://github.com/github/github-mcp-server/releases/download/v${GH_MCP_VERSION}/${asset}"; \
-    echo "${sha}  /tmp/gh-mcp.tgz" | sha256sum -c -; \
-    tar -xzf /tmp/gh-mcp.tgz -C /usr/local/bin github-mcp-server; \
-    chmod 0755 /usr/local/bin/github-mcp-server; \
-    rm -f /tmp/gh-mcp.tgz; \
-    github-mcp-server --version
-
 # Vendored stdio bridge for upstreams the gateway cannot talk to directly — see
 # upstreams/mcp-bridge/bridge.py. Two cases it exists for:
 #   1. a remote HTTP upstream needing a static bearer token (the gateway applies
@@ -144,12 +121,6 @@ RUN set -eux; \
 # The import check below fails the build if the image's fastmcp stops exposing the
 # proxy API this bridge is written against.
 COPY upstreams/mcp-bridge /opt/mcp-bridge
-# The predecessor of the bridge, still referenced by the deployed compose env
-# until that entry migrates (next release). Remove this COPY and the directory
-# once `cloudflare` points at /opt/mcp-bridge/bridge.py — dropping it now would
-# break that upstream for the window between this image rolling and the env
-# update landing.
-COPY upstreams/cloudflare-mcp-proxy /opt/cf-mcp-proxy
 RUN python -c "from fastmcp.client.transports import StdioTransport, StreamableHttpTransport; \
 from fastmcp.server import create_proxy; \
 from fastmcp.server.providers.proxy import ProxyClient; \
