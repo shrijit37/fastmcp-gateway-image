@@ -89,4 +89,47 @@ RUN cd /opt/ccb-web-mcp \
          --target=node20 --format=esm --outfile=dist/index.js --log-level=warning \
     && rm -rf node_modules test
 
+# Vendored stdio upstream: Oracle's official OCI MCP server
+# (github.com/oracle/mcp → src/oci-api-mcp-server, UPL-1.0). Its tools discover
+# and run OCI CLI commands, backed by the official CLI that installs alongside it.
+#
+# Chosen over the sibling oci-cloud-mcp-server (SDK-backed, 5 generic tools)
+# because that one resolves auth through oci.config.from_file and demands a real
+# ~/.oci/config plus a PEM on disk, which a stdio child cannot be handed through
+# the environment. This server authenticates entirely from OCI_CLI_* variables —
+# verified end to end on this image's Python 3.12 with no ~/.oci present: live
+# `iam region list` (44 regions) and `os ns get` results over stdio.
+# `OCI_CLI_AUTH=api_key` is load-bearing: without it the server probes for a
+# session-token profile first and fails on the missing config file.
+#
+# The metadata declares requires-python >=3.13 but the code runs on 3.12, so
+# --ignore-requires-python is deliberate. The release pins oci-cli==3.89.3 and
+# the server enforces that pair at runtime — do not install a different one.
+RUN pip install --no-cache-dir --ignore-requires-python oracle.oci-api-mcp-server==2.1.5 \
+    && test -x /usr/local/bin/oracle.oci-api-mcp-server \
+    && test -x /usr/local/bin/oci
+
+# Vendored stdio upstream: GitHub's official MCP server (github/github-mcp-server,
+# MIT, v2.0.2). A static Go binary (CGO_ENABLED=0), verified against the release
+# checksum for the arch being built, so it adds no runtime dependency and no npm.
+# `--read-only` is the default here because this gateway executes tools
+# unattended: write tools are skipped even when a model asks for them. Widen the
+# surface (or narrow it with --toolsets) by editing the upstream entry's args in
+# the compose env, not this image.
+ARG GH_MCP_VERSION=2.0.2
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) asset="github-mcp-server_Linux_x86_64.tar.gz"; sha="815e27d931c796af0c97f24fd211e14f8a4607d4528377719a5ad2352086b0b0" ;; \
+      arm64) asset="github-mcp-server_Linux_arm64.tar.gz";  sha="73f5e76c6a3b5e0d731e1134a7c38575df6ec96c646192095a3be2d4d0d6c1fc" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/gh-mcp.tgz \
+      "https://github.com/github/github-mcp-server/releases/download/v${GH_MCP_VERSION}/${asset}"; \
+    echo "${sha}  /tmp/gh-mcp.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/gh-mcp.tgz -C /usr/local/bin github-mcp-server; \
+    chmod 0755 /usr/local/bin/github-mcp-server; \
+    rm -f /tmp/gh-mcp.tgz; \
+    github-mcp-server --version
+
 ENTRYPOINT ["python", "/usr/local/bin/gateway_entry.py"]

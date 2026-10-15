@@ -71,8 +71,8 @@ POST /mcp  initialize → tools/call discover_tools {domain:"dokploy"}
 A healthy gateway exposes **4 client-visible tools** (`discover_tools`,
 `get_tool_schema`, `execute_tool`, `refresh_registry` — about 7.4 KB of schemas,
 the entire context cost of mounting it) and a discovery registry behind them
-holding 604 dokploy tools plus infisical (10), deepwiki (3), context7 (2),
-sequential-thinking (1) and the vendored websearch (3). Nothing from the
+holding the 604 dokploy tools plus the search, source-control, cloud and OCI
+domains described below. Nothing from the
 registry enters context unless the agent asks: a whole-domain listing
 (`discover_tools("dokploy")`) is ~107 KB, a single tool's schema about 250 B.
 
@@ -198,11 +198,65 @@ Per-call-independent knobs (`TAVILY_ENDPOINT_URL`, `EXA_API_KEY`,
 `EXA_ENDPOINT_URL`, `WEB_FETCH_HTTP_TIMEOUT_MS`) go in the same `env` block and
 are otherwise left at their defaults.
 
+## Authenticated upstreams (github, oci, cloudflare)
+
+**Why these are stdio children and not HTTP URLs.** `GATEWAY_UPSTREAM_HEADERS`
+is applied on the *execution* path only (`client_manager._make_execution_client`);
+registry **population** uses a separate client that takes
+`GATEWAY_REGISTRY_AUTH_TOKEN` — a single bearer applied to *every* upstream — and
+no per-domain headers. An HTTP upstream that needs auth to answer `tools/list`
+therefore logs `Failed to populate upstream '<domain>' — skipping` with `401` and
+never appears in `discover_tools`, even with a correct header entry. Measured on
+2026-10-16: `github` and the Cloudflare per-product servers failed exactly this
+way while the public `cloudflare-docs` server populated normally. Setting the
+global registry token would "fix" it by sending one credential to all upstreams,
+including third parties (context7, deepwiki) — not done here.
+
+Each entry below therefore carries its credentials in its own `env`, which the
+gateway passes to the child verbatim:
+
+| domain | command | credential | surface |
+|---|---|---|---|
+| `github` | `github-mcp-server stdio --read-only` (vendored v2.0.2, MIT) | `GITHUB_PERSONAL_ACCESS_TOKEN` | 27 read-only tools (`repo:oracle/mcp` search verified live) |
+| `oci` | `oracle.oci-api-mcp-server` (Oracle-official, pip 2.1.5) | `OCI_CLI_AUTH=api_key` + `OCI_CLI_USER`/`TENANCY`/`FINGERPRINT`/`REGION`/`KEY_CONTENT` | OCI CLI discovery + execution tools |
+| `cloudflare` | `npx -y mcp-remote@0.15.1 https://mcp.cloudflare.com/mcp --header "Authorization: Bearer ${CLOUDFLARE_MCP_TOKEN}"` | `CLOUDFLARE_MCP_TOKEN` | 4 Code-Mode tools over ~2500 Cloudflare API endpoints |
+
+**GitHub** is vendored as a static Go binary at image build (release tag pinned,
+per-arch sha256 verified, `CGO_ENABLED=0` so it has no runtime deps). `--read-only`
+is deliberate: this gateway executes tools unattended, so write tools are skipped
+even if a model asks for them. To widen or narrow it, edit the entry's `args` in
+the compose env (`--toolsets repos,issues`, or drop `--read-only`) — not the image.
+`GITHUB_PERSONAL_ACCESS_TOKEN` currently holds the workstation `gh` OAuth token
+(`gh auth token`); a fine-grained PAT works too and is the least-privilege option.
+Rotate by re-running `gh auth token` and re-applying the env block.
+
+**OCI** installs Oracle's official `oracle.oci-api-mcp-server`; its metadata says
+`requires-python >=3.13` while this image is 3.12, so the install passes
+`--ignore-requires-python` (verified working on 3.12, live `iam region list` and
+`os ns get`). The release pins `oci-cli==3.89.3` and the server enforces that pair
+at runtime. `OCI_CLI_AUTH=api_key` is load-bearing — without it the server probes
+for a session-token profile first and fails on the missing config file. Credentials
+come from the workstation profile `~/.oci/config`: user/tenancy/fingerprint/region
+as plain values, and the private key as PEM **text** in `OCI_CLI_KEY_CONTENT`
+(no file is written to disk in the container).
+
+**Cloudflare** reaches the unified official server through `mcp-remote`, which
+expands `${…}` from its own environment, so the token never appears in `args`.
+`CLOUDFLARE_MCP_TOKEN` is an *account-owned API token* minted with
+`POST /accounts/<id>/tokens` (name `fastmcp-gateway-mcp`), scoped to 24 read-only
+permission groups, non-expiring. The CLI's own OAuth session
+(`~/.config/cloudflare/config/default.json`) **does** expire — it was ~40 minutes
+from expiry when this was wired — which is why the durable token exists. Some
+groups (`Workers Content Read-Only`, `Workers Metadata Read-Only`) are outside
+that session's scopes and make the create call fail with HTTP 400 if requested.
+Account-owned tokens have no user permissions, so the server's `/user` identity
+probe fails by design and `/accounts` is the proof it works.
+
 ## Repo layout
 
 | path | role |
 |---|---|
-| `Dockerfile` | the image: pinned gateway + the two patches + the vendored upstream bundle |
+| `Dockerfile` | the image: pinned gateway + the two patches + the vendored websearch bundle + the vendored OCI and GitHub upstreams |
 | `upstreams/ccb-web-mcp/` | vendored stdio upstream `websearch` — source, tests, `NOTICE.md` |
 | `gateway_middleware.py` | bearer auth on every non-probe route + `/healthz` version |
 | `.github/workflows/build-deploy.yml` | build, pin, deploy, both gates |
