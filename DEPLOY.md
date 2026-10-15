@@ -43,10 +43,21 @@ reported `APP_VERSION=240e8e8…`).
 
 `GET /healthz` → `200 {"status":"ok","service":"fastmcp-gateway","version":"<sha>"}`,
 `GET /readyz` → `200 {"status":"ready"}`. Routes come from the gateway package;
-`service`/`version` are added by this repo's `health_version.py`, an ASGI
-middleware loaded through the gateway's own `GATEWAY_MIDDLEWARE_MODULE` hook
-(allowlisted by `GATEWAY_ALLOWED_MIDDLEWARE_PREFIXES` — both baked into the
-image, both overridable from the compose env).
+`service`/`version` are added by this repo's `gateway_middleware.py`, loaded
+through the gateway's own `GATEWAY_MIDDLEWARE_MODULE` hook (allowlisted by
+`GATEWAY_ALLOWED_MIDDLEWARE_PREFIXES` — both baked into the image).
+
+Both probes are the **only** public routes: every other path, `/mcp` included,
+requires `Authorization: Bearer $GATEWAY_AUTH_TOKEN` and answers
+`401 {"error":"unauthorized"}` without it. The same module enforces that, and it
+fails closed — with the token unset (or shorter than 16 characters) non-probe
+routes answer `503 auth_not_configured` while `/healthz` keeps working, so a
+broken config is diagnosable instead of either locked out or silently open.
+
+Verified behaviour (local run and live): anonymous `/mcp` → 401, wrong token →
+401, valid token → 200, no token configured → 503. Gate 2 re-asserts the 401
+case on every deploy, so an accidental auth regression fails the run instead of
+quietly reopening the endpoint.
 
 **Deviation:** the fleet contract also wants a `checks` object built from real
 dependency probes. This service emits none — the gateway answers `ok` whenever
@@ -60,7 +71,7 @@ POST /mcp  initialize → tools/call discover_tools {domain:"dokploy"}
 A healthy gateway exposes **4 client-visible tools** (`discover_tools`,
 `get_tool_schema`, `execute_tool`, `refresh_registry` — about 7.4 KB of schemas,
 the entire context cost of mounting it) and a discovery registry behind them
-holding 604 dokploy tools plus deepwiki (3) and context7 (2). Nothing from the
+holding 604 dokploy tools plus infisical (10), deepwiki (3) and context7 (2). Nothing from the
 registry enters context unless the agent asks: a whole-domain listing
 (`discover_tools("dokploy")`) is ~107 KB, a single tool's schema about 250 B.
 
@@ -72,9 +83,16 @@ health check on the service.
 
 ## Secrets
 
-Repo-level: secret `DOKPLOY_API_KEY` (also in Infisical `platform`/`prod`), vars
-`DOKPLOY_URL` and `DOKPLOY_COMPOSE_ID`. The deploy job uses them only to write
-the compose file and roll the app.
+Repo-level: secret `DOKPLOY_API_KEY` (also in Infisical `platform`/`prod`),
+secret `GATEWAY_AUTH_TOKEN` (gate 2's credential), vars `DOKPLOY_URL` and
+`DOKPLOY_COMPOSE_ID`. The deploy job uses them only to write the compose file,
+roll the app and call the endpoint.
+
+`GATEWAY_AUTH_TOKEN` is the gateway's own shared secret. It lives in four places
+that must be rotated together: the compose env (authoritative), Infisical
+`platform`/`prod` as `GATEWAY_AUTH_TOKEN`, the repo secret CI reads, and the
+client header in `~/.omp/agent/mcp.json`. Rotate with `openssl rand -hex 32`,
+then `compose.saveEnvironment` + `compose.deploy` and confirm 401 → 200.
 
 Runtime configuration is the compose app's **encrypted env block**, which a
 deploy never rewrites (`compose.update` without an `env` key leaves it
@@ -126,6 +144,6 @@ replaces the whole block).
 | path | role |
 |---|---|
 | `Dockerfile` | the image: pinned gateway + the two patches |
-| `health_version.py` | `/healthz` version middleware |
+| `gateway_middleware.py` | bearer auth on every non-probe route + `/healthz` version |
 | `.github/workflows/build-deploy.yml` | build, pin, deploy, both gates |
 | `DEPLOY.md` | this file |
