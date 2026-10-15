@@ -1,5 +1,9 @@
 FROM nikolaik/python-nodejs:python3.12-nodejs20
 
+# Build identity. CI passes the full commit SHA; the health middleware reports
+# it from /healthz so a deploy can prove which build is actually serving.
+ARG APP_VERSION=dev
+
 RUN pip install --no-cache-dir fastmcp-gateway==0.33.0
 
 # fastmcp-gateway 0.33.0 rejects any upstream tool whose name does not match
@@ -46,5 +50,17 @@ from fastmcp_gateway.__main__ import main  # noqa: E402
 if __name__ == "__main__":
     main()
 PY
+
+# The gateway's /healthz is a hardcoded {"status":"ok"} — no build identity, so
+# no deploy can prove which SHA is live. This middleware adds service+version to
+# that one route; it is loaded through the gateway's own env-driven hook and
+# gated by the allowlist entry below. Both values are baked here so a plain
+# `docker run` of this image reports its identity, and both stay overridable
+# from the Dokploy app env.
+COPY health_version.py /opt/gateway/health_version.py
+ENV PYTHONPATH=/opt/gateway \
+    GATEWAY_MIDDLEWARE_MODULE=health_version:middleware \
+    GATEWAY_ALLOWED_MIDDLEWARE_PREFIXES=health_version \
+    APP_VERSION=${APP_VERSION}
 
 ENTRYPOINT ["python", "/usr/local/bin/gateway_entry.py"]
