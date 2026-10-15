@@ -71,7 +71,8 @@ POST /mcp  initialize → tools/call discover_tools {domain:"dokploy"}
 A healthy gateway exposes **4 client-visible tools** (`discover_tools`,
 `get_tool_schema`, `execute_tool`, `refresh_registry` — about 7.4 KB of schemas,
 the entire context cost of mounting it) and a discovery registry behind them
-holding 604 dokploy tools plus infisical (10), deepwiki (3) and context7 (2). Nothing from the
+holding 604 dokploy tools plus infisical (10), deepwiki (3), context7 (2),
+sequential-thinking (1) and the vendored websearch (3). Nothing from the
 registry enters context unless the agent asks: a whole-domain listing
 (`discover_tools("dokploy")`) is ~107 KB, a single tool's schema about 250 B.
 
@@ -98,8 +99,12 @@ Runtime configuration is the compose app's **encrypted env block**, which a
 deploy never rewrites (`compose.update` without an `env` key leaves it
 byte-identical — checked):
 
-- `GATEWAY_UPSTREAMS` — JSON: `context7` (HTTP), `deepwiki` (HTTP), `dokploy`
-  (stdio `npx -y @dokploy/mcp`, with its own `DOKPLOY_URL` + `DOKPLOY_API_KEY`).
+- `GATEWAY_UPSTREAMS` — JSON, one entry per domain: `context7` (HTTP),
+  `deepwiki` (HTTP), `dokploy` (stdio `npx -y @dokploy/mcp`, with its own
+  `DOKPLOY_URL` + `DOKPLOY_API_KEY`), `infisical` (stdio `npx -y @infisical/mcp`),
+  `sequential-thinking` (stdio `npx -y @modelcontextprotocol/server-sequential-thinking`),
+  and `websearch` (stdio `node /opt/ccb-web-mcp/dist/index.js` — vendored into
+  this image, see below).
 - `GATEWAY_UPSTREAM_HEADERS` — JSON: the context7 bearer token.
 - `GATEWAY_MAX_SCHEMA_DEPTH=12`, `GATEWAY_NAME`, `GATEWAY_HOST=0.0.0.0`,
   `GATEWAY_PORT=8080`, `GATEWAY_REFRESH_INTERVAL=300`,
@@ -138,12 +143,48 @@ replaces the whole block).
 | gate 2 reports `dokploy_tools < 600` | the registry dropped tools again — look for `Rejected tool` lines in the container logs and for upstream schemas needing a higher `GATEWAY_MAX_SCHEMA_DEPTH` |
 | deploy job 401/403 | `DOKPLOY_API_KEY` rotated; update the repo secret |
 | deploy job complains `DOKPLOY_COMPOSE_ID` is not set | the repo variable was removed — it is the compose app's id, visible in Dokploy's compose URL |
+| `websearch` missing from `discover_tools`, or its upstream populates 0 tools | the compose env lost the `websearch` key (a `saveEnvironment` that did not re-assert every key) or the pinned image predates the bundle — confirm `/opt/ccb-web-mcp/dist/index.js` exists in the running container, then re-apply the whole env block and redeploy |
+
+## Vendored upstream: websearch
+
+`upstreams/ccb-web-mcp/` is a keyless web search/fetch MCP server — three tools
+(`web_search`, `web_fetch`, `web_search_health`), three backends (bing default,
+tavily, exa), no API key for any of them. It is vendored here and runs **inside
+the gateway container** as a stdio child, so it needs no second service, image or
+domain. Provenance and its licensing caveat: `upstreams/ccb-web-mcp/NOTICE.md`.
+
+Bundle, not source-run: the base image's node is 20 and native TypeScript
+execution needs 22.6+, so the Dockerfile runs `npm ci` and a pinned
+`esbuild@0.25.0` (`--bundle --platform=node --target=node20 --format=esm`) into
+`dist/index.js`, then deletes `node_modules` and `test/`. The bundle inlines
+`@modelcontextprotocol/sdk` and `zod`; `package.json` stays next to it so node
+reads the output as ESM. Measured: 764124 bytes, identical in the build image.
+
+Enabling or updating it — CI writes only the compose *file*, never the env, so
+the registry entry is a deliberate step after the image carrying the code is
+live:
+
+1. edit `upstreams/ccb-web-mcp/`, push to `main`, wait for build-deploy to go
+   green (both gates pass with or without this child running);
+2. `compose.saveEnvironment` with the **whole** env block, adding
+   `"websearch": {"mcpServers": {"websearch": {"command": "node",
+   "args": ["/opt/ccb-web-mcp/dist/index.js"]}}}` to `GATEWAY_UPSTREAMS`;
+3. `compose.deploy`, then verify: container log
+   `Populated 3 tools from upstream 'websearch'`, `discover_tools(domain="websearch")`
+   listing all three, `execute_tool` → `web_search` returning real URLs, and
+   `web_search_health` reporting each backend (`markup-drift` there means Bing
+   changed its markup and `src/backends/bing.ts` needs the parser updated).
+
+Optional knobs, all defaulted, set in the compose env: `WEB_SEARCH_ADAPTER`,
+`TAVILY_ENDPOINT_URL`, `EXA_API_KEY`, `EXA_ENDPOINT_URL`,
+`WEB_FETCH_HTTP_TIMEOUT_MS`.
 
 ## Repo layout
 
 | path | role |
 |---|---|
-| `Dockerfile` | the image: pinned gateway + the two patches |
+| `Dockerfile` | the image: pinned gateway + the two patches + the vendored upstream bundle |
+| `upstreams/ccb-web-mcp/` | vendored stdio upstream `websearch` — source, tests, `NOTICE.md` |
 | `gateway_middleware.py` | bearer auth on every non-probe route + `/healthz` version |
 | `.github/workflows/build-deploy.yml` | build, pin, deploy, both gates |
 | `DEPLOY.md` | this file |

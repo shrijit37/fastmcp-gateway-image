@@ -65,4 +65,28 @@ ENV PYTHONPATH=/opt/gateway \
     GATEWAY_ALLOWED_MIDDLEWARE_PREFIXES=gateway_middleware \
     APP_VERSION=${APP_VERSION}
 
+# Vendored stdio upstream: ccb-web-mcp (keyless web search + fetch), an original
+# server that ports three backends from claude-code-best — see
+# upstreams/ccb-web-mcp/NOTICE.md for provenance and licensing.
+#
+# The base image runs node 20, which cannot execute this TypeScript directly
+# (native type stripping landed in 22.6), so the build bundles it with a pinned
+# esbuild into one ESM file. --target=node20 keeps the output honest for this
+# interpreter, the bundle inlines both runtime deps
+# (@modelcontextprotocol/sdk, zod), and package.json is kept beside dist/ so
+# node still reads dist/index.js as ESM. node_modules and the network-dependent
+# test suite do not belong in the runtime image.
+#
+# Registered through the compose env as the `websearch` domain:
+#   "websearch": {"mcpServers": {"websearch": {"command": "node",
+#                 "args": ["/opt/ccb-web-mcp/dist/index.js"]}}}
+# The server is keyless by design (backends: bing (default), tavily, exa) and
+# writes only JSON-RPC to stdout, which stdio transport requires.
+COPY upstreams/ccb-web-mcp /opt/ccb-web-mcp
+RUN cd /opt/ccb-web-mcp \
+    && npm ci --omit=dev --no-audit --no-fund \
+    && npx --yes esbuild@0.25.0 src/index.ts --bundle --platform=node \
+         --target=node20 --format=esm --outfile=dist/index.js --log-level=warning \
+    && rm -rf node_modules test
+
 ENTRYPOINT ["python", "/usr/local/bin/gateway_entry.py"]

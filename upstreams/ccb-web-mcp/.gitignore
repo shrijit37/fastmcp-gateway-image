@@ -1,0 +1,3 @@
+# Build output — npm ci runs in the image build, esbuild produces dist/index.js.
+node_modules/
+dist/

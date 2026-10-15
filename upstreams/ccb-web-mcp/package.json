@@ -1,0 +1,22 @@
+{
+  "name": "ccb-web-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Keyless web search + fetch MCP server for Claude Code, ported from claude-code-best's web tooling",
+  "type": "module",
+  "bin": {
+    "ccb-web-mcp": "src/index.ts"
+  },
+  "scripts": {
+    "start": "node src/index.ts",
+    "test": "node --test --test-timeout=120000",
+    "test:offline": "node --test test/parse.test.ts"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.0"
+  }
+}
