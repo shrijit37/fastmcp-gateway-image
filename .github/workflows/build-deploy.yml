@@ -17,6 +17,11 @@ concurrency:
   group: build-deploy-main
   cancel-in-progress: false
 
+env:
+  APP_ID: A9F6GcGMBXzeQl2V5foFh
+  APP_URL: https://mcp.shrijit.tech
+  DOKPLOY_URL: ${{ vars.DOKPLOY_URL || 'https://manage.shrijit.tech' }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -44,3 +49,105 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:${{ github.sha }}
             ghcr.io/${{ github.repository }}:latest
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Point the Dokploy app at this build
+        env:
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          # Long-lived read:packages token. Only needed while the GHCR package
+          # is private; a public package pulls anonymously.
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_SHA"
+          payload=$(jq -nc \
+            --arg id "$APP_ID" --arg image "$IMAGE" --arg user "$GITHUB_REPOSITORY_OWNER" \
+            --arg token "${GHCR_PULL_TOKEN:-}" \
+            '{applicationId: $id, dockerImage: $image, registryUrl: "ghcr.io",
+              username: (if $token == "" then null else $user end),
+              password: (if $token == "" then null else $token end)}')
+          curl -fsS -X POST "$DOKPLOY_URL/api/application.saveDockerProvider" \
+            -H "x-api-key: $DOKPLOY_API_KEY" -H 'Content-Type: application/json' \
+            -d "$payload"
+          echo "app image set to $IMAGE"
+
+      - name: Roll the service
+        env:
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+        run: |
+          set -euo pipefail
+          # application.deploy, never redeploy: redeploy can answer "Rebuild
+          # deployment" and never recreate the container.
+          curl -fsS -X POST "$DOKPLOY_URL/api/application.deploy" \
+            -H "x-api-key: $DOKPLOY_API_KEY" -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg id "$APP_ID" --arg title "CI ${GITHUB_SHA:0:7}" \
+                  '{applicationId: $id, title: $title}')"
+
+      - name: Gate — assert the running build is this SHA
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 300))
+          while [ $SECONDS -lt $deadline ]; do
+            body=$(curl -fsS --max-time 10 "$APP_URL/healthz" || true)
+            version=$(jq -r '.version // empty' <<<"${body:-{}}" 2>/dev/null || true)
+            if [ "$version" = "$GITHUB_SHA" ]; then
+              echo "healthz reports $version — gate passed"
+              cat <<<"$body"
+              exit 0
+            fi
+            echo "waiting: healthz version=${version:-<none>} want=$GITHUB_SHA"
+            sleep 6
+          done
+          echo "::error::gate failed — $APP_URL/healthz never reported $GITHUB_SHA (one-shot liveness checks lie: the old container keeps serving)"
+          exit 1
+
+      - name: Gate — assert the tool surface came back
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, sys, urllib.request
+
+          url = f"{os.environ['APP_URL']}/mcp"
+          headers = {"Content-Type": "application/json",
+                     "Accept": "application/json, text/event-stream"}
+          sid = None
+
+          def post(payload):
+              global sid
+              h = dict(headers)
+              if sid:
+                  h["mcp-session-id"] = sid
+              req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=h)
+              resp = urllib.request.urlopen(req, timeout=60)
+              sid = resp.headers.get("mcp-session-id") or sid
+              raw = resp.read().decode()
+              for line in raw.splitlines():
+                  if line.startswith("data: "):
+                      return json.loads(line[6:])
+              return json.loads(raw)
+
+          init = post({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                       "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                                  "clientInfo": {"name": "deploy-gate", "version": "0"}}})
+          domains = dict(re.findall(r"\*\*(\w+)\*\* \((\d+) tools\)",
+                                    init["result"]["instructions"]))
+          text = post({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                       "params": {"name": "discover_tools", "arguments": {"domain": "dokploy"}}})
+          names = re.findall(r"^([A-Za-z0-9_.-]+)\(", text["result"]["content"][0]["text"], re.M)
+
+          # The write surface the depth-cap bug used to drop silently.
+          required = ["application-update", "ai-deploy", "sso-register",
+                      "admin-setupMonitoring", "vaultProvider-create",
+                      "postgres-update", "redis-update", "whitelabeling-update"]
+          missing = [t for t in required if t not in names]
+          print(f"domains={domains} dokploy_tools={len(names)} missing={missing}")
+          if missing:
+              print(f"::error::dokploy tools missing from the gateway: {missing}")
+              sys.exit(1)
+          if len(names) < 600:
+              print(f"::error::dokploy tool surface shrank: {len(names)} < 600")
+              sys.exit(1)
+          PY
