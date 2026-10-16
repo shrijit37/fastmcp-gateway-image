@@ -223,8 +223,8 @@ gateway passes to the child verbatim:
 
 **GitHub** goes through the vendored bridge to GitHub's hosted MCP endpoint
 (`/mcp/x/all` selects every toolset): 100 tools, writes included, verified with
-three consecutive calls. The local `github-mcp-server` binary is still built into
-the image but no longer registered — it works when driven directly, yet **every
+three consecutive calls. The local `github-mcp-server` binary was dropped from
+the image in `ef9815c` — it works when driven directly, yet **every
 call after the first fails through the gateway**: the gateway reuses a stdio child
 and re-initializes it per call, and this server refuses the second handshake
 (`duplicate initialize request`, no response) instead of tolerating it the way the
@@ -250,7 +250,7 @@ with an interactive OAuth flow and waits for a browser that never opens. Measure
 2026-10-16: that call happens during registry population, so it blocked the whole
 gateway — every client got **502** until the upstream was removed. The bridge
 attaches one static header and fails fast instead: with a bad token it dies in
-~6 s and population simply skips the domain. `CLOUDFLARE_MCP_TOKEN` is an
+~6 s and population simply skips the domain. `MCP_UPSTREAM_TOKEN` holds an
 *account-owned API token* minted with `POST /accounts/<id>/tokens` (name `fastmcp-gateway-mcp`), scoped to read **and write**
 permission groups (49 of them zone-scoped, so DNS records, cache purge, worker
 routes and zone settings are all editable). Writes were verified by creating and
