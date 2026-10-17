@@ -126,4 +126,29 @@ from fastmcp.server import create_proxy; \
 from fastmcp.server.providers.proxy import ProxyClient; \
 print('fastmcp proxy API present')"
 
+# Vendored stdio upstream: doppler (read-only Doppler secrets), original code —
+# see upstreams/doppler-mcp/NOTICE.md. Doppler's official npm server cannot be
+# registered here: `npx @dopplerhq/mcp-server` generates its tool schemas from
+# Doppler's OpenAPI document, and 12 of its 13 root schemas declare
+# `additionalProperties: true`, which the registry rejects. That check is right —
+# an open root lets an upstream smuggle unvalidated keys through execute_tool —
+# so it stays, and this first-party server closes every schema instead (explicit
+# properties + required, additionalProperties: false, no $ref at any depth).
+# Same pattern as ccb-web-mcp and mcp-bridge above.
+#
+# No build step: stdlib HTTP plus the `mcp` SDK that fastmcp-gateway already
+# installs. The import check below fails the build if the vendored copy or that
+# SDK drifts, instead of the `doppler` domain silently populating zero tools.
+# Registered through the compose env as the `doppler` domain:
+#   "doppler": {"mcpServers": {"doppler": {"command": "python",
+#               "args": ["/opt/doppler-mcp/server.py"],
+#               "env": {"DOPPLER_TOKEN": "dp.st.<service-token>",
+#                       "DOPPLER_PROJECT": "platform",
+#                       "DOPPLER_CONFIG": "prd"}}}}
+# The tests need pytest and a live token, so they stay out of the image.
+COPY upstreams/doppler-mcp /opt/doppler-mcp
+RUN cd /opt/doppler-mcp && rm -rf tests && python -c "import server; \
+assert [t.name for t in server.TOOLS] == ['list-projects', 'list-configs', 'get-config', 'list-secrets', 'get-secret', 'download-secrets']; \
+print('doppler-mcp import ok')"
+
 ENTRYPOINT ["python", "/usr/local/bin/gateway_entry.py"]

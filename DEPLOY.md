@@ -101,7 +101,9 @@ byte-identical — checked):
 
 - `GATEWAY_UPSTREAMS` — JSON, one entry per domain: `context7` (HTTP),
   `deepwiki` (HTTP), `dokploy` (stdio `npx -y @dokploy/mcp`, with its own
-  `DOKPLOY_URL` + `DOKPLOY_API_KEY`), `infisical` (stdio `npx -y @infisical/mcp`),
+  `DOKPLOY_URL` + `DOKPLOY_API_KEY`), `doppler` (stdio
+  `python /opt/doppler-mcp/server.py` — vendored into this image, see below, with
+  its own `DOPPLER_TOKEN` + optional `DOPPLER_PROJECT`/`DOPPLER_CONFIG`),
   `sequential-thinking` (stdio `npx -y @modelcontextprotocol/server-sequential-thinking`),
   and `websearch` (stdio `node /opt/ccb-web-mcp/dist/index.js` — vendored into
   this image, see below).
@@ -180,8 +182,8 @@ live:
 The gateway does not hand its own environment to stdio children: a
 container-level `WEB_SEARCH_ADAPTER=exa` was deployed and confirmed present in
 `/proc/1/environ`, and the child still defaulted to bing; moving the same key
-into the entry's `env` block took effect immediately. `dokploy` and `infisical`
-carry their credentials the same way for the same reason.
+into the entry's `env` block took effect immediately. `dokploy` carries its
+credentials the same way for the same reason.
 
 **The deployed default backend is `exa`, not the server's own `bing` default.**
 Measured 2026-10-16 from both this host and the workstation: bing returned
